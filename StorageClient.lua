@@ -1,6 +1,6 @@
 -- Place in StarterPlayerScripts
 
---[[
+--[[ 
   StorageClient.lua
   Handles:
     - Inventory GUI (left)
@@ -35,6 +35,9 @@ local stackLabel = storageGui:WaitForChild("StackLabel")
 -- Add this: reference to your close button (must exist in your GUI)
 local closeButton = storageGui:WaitForChild("Done")
 
+-- Fallback image asset ID if missing
+local FALLBACK_IMAGE = "rbxassetid://6031068438" -- Roblox "?" icon. Replace if you want a different placeholder.
+
 -- Data
 local currentShelfId = nil
 local currentShelfItems = {}
@@ -59,8 +62,8 @@ function updateInventoryDisplay(invData)
 		itemF.Visible = true
 		itemF.Parent = itemsSF
 
-		-- Set image and count (adjust if your UI structure is different)
-		itemF.Image.Image = stackData.Image
+		-- Set image and count (defensive: fallback for missing image)
+		itemF.Image.Image = stackData.Image or FALLBACK_IMAGE
 		itemF.ItemCount.Text = tostring(#stackData.Items) .. "x"
 
 		-- Drag-to-storage logic with visual feedback
@@ -109,8 +112,15 @@ function updateStorageDisplay()
 	for _, stackData in ipairs(currentShelfItems) do
 		local itemF = storageSample:Clone()
 		itemF.Name = "Stack-" .. stackData.StackId
-		itemF.Image.Image = stackData.Image
-		itemF.ItemCount.Text = tostring(#stackData.Items) .. "x"
+		-- Defensive: Use fallback image if missing
+		itemF.Image.Image = stackData.Image or FALLBACK_IMAGE
+		if stackData.Items then
+			itemF.ItemCount.Text = tostring(#stackData.Items) .. "x"
+		elseif stackData.Count then
+			itemF.ItemCount.Text = tostring(stackData.Count) .. "x"
+		else
+			itemF.ItemCount.Text = "?"
+		end
 		itemF.Visible = true
 		itemF.Parent = storageSF
 
