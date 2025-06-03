@@ -6,19 +6,25 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PlotStore = DataStoreService:GetDataStore("PlotStore")
 local placeableObjects = ReplicatedStorage.PlaceableObjects
-local ToolTemplates = ReplicatedStorage:FindFirstChild("Tools") -- Adjust path as needed!
 
 local ServerScriptService = game:GetService("ServerScriptService")
+local ServerStorage = game:GetService("ServerStorage")
+local ToolTemplates = ServerStorage:WaitForChild("AllItems")
 local ShelfData = require(ServerScriptService.StorageServer)
+local InventoryServer = require(ServerScriptService.Server.InventoryServer)
 
 type ObjectInfo = {
 	Name: string,
 	Cf: {number},
-	StorageId: string?, -- for storage objects
-	StorageItems: table?, -- for storage bins
+	StorageId: string?,
+	StorageItems: table?,
 }
 
--- Recursively copy and sanitize all item fields needed for gameplay (Name, StackId, Count, Type, etc)
+local STACK_SAVE_FIELDS = {
+	"Name", "StackId", "Count", "Type", "ItemType", "IsDroppable",
+	"Image", "Description", "Items"
+}
+
 local function deepSanitize(value)
 	local t = type(value)
 	if t == "string" or t == "number" or t == "boolean" or t == "nil" then
@@ -32,20 +38,28 @@ local function deepSanitize(value)
 		end
 		return out
 	else
-		return nil -- strip out functions, instances, userdata, etc
+		return nil
 	end
 end
 
--- Save enough to reconstruct tools/items (add fields as needed)
 local function sanitizeStack(stack)
-	return {
-		Name = stack.Name,
-		StackId = stack.StackId,
-		Count = stack.Count or (stack.Items and #stack.Items or 1),
-		Type = stack.Type,
-		-- Add more fields if your items need them!
-		Items = stack.Items and deepSanitize(stack.Items) or nil, -- optional, if you need per-item info
-	}
+	local out = {}
+	for _, field in ipairs(STACK_SAVE_FIELDS) do
+		local value = stack[field]
+		if type(value) == "table" then
+			local copy = {}
+			for k, v in pairs(value) do
+				if typeof(v) ~= "Instance" and typeof(v) ~= "function" then
+					copy[k] = v
+				end
+			end
+			out[field] = copy
+		elseif typeof(value) ~= "Instance" and typeof(value) ~= "function" then
+			out[field] = value
+		end
+	end
+	out.Count = stack.Items and #stack.Items or stack.Count or 1
+	return out
 end
 
 local function sanitizeShelfItems(items)
@@ -101,22 +115,28 @@ function PlotStorage.Load(player: Player)
 			object:PivotTo(plot:GetPivot():ToWorldSpace(relativeCf))
 			if objectInfo.StorageId then
 				object:SetAttribute("StorageId", objectInfo.StorageId)
-				-- Restore shelf contents
+				local restoredItems = {}
 				if objectInfo.StorageItems then
-					ShelfData[objectInfo.StorageId] = {
-						Items = deepSanitize(objectInfo.StorageItems),
-						MaxStacks = 8,
-						Owner = player,
-						ShelfInstance = object,
-					}
-				else
-					ShelfData[objectInfo.StorageId] = {
-						Items = {},
-						MaxStacks = 8,
-						Owner = player,
-						ShelfInstance = object,
-					}
+					for i, savedStack in ipairs(objectInfo.StorageItems) do
+						local stack = {}
+						for _, field in ipairs(STACK_SAVE_FIELDS) do
+							stack[field] = savedStack[field]
+						end
+						stack.Items = stack.Items or {}
+						if (#stack.Items == 0) and stack.Count and stack.Name then
+							for j = 1, stack.Count do
+								stack.Items[j] = true
+							end
+						end
+						restoredItems[i] = stack
+					end
 				end
+				ShelfData[objectInfo.StorageId] = {
+					Items = restoredItems,
+					MaxStacks = 8,
+					Owner = player,
+					ShelfInstance = object,
+				}
 			end
 			object.Parent = plot.Objects 
 		end
@@ -166,9 +186,9 @@ function PlotStorage.WaitForSave()
 	end
 end
 
--- Handler: Withdraw an item from storage bin
--- Call this function when a player wants to take an item out of storage
+-- Withdraw an item from storage bin and put real Tool in Backpack & inventory
 function PlotStorage.WithdrawItem(player, storageId, stackIndex)
+	print('trying')
 	local shelf = ShelfData[storageId]
 	if not shelf or not shelf.Items or not shelf.Items[stackIndex] then return end
 
@@ -176,22 +196,58 @@ function PlotStorage.WithdrawItem(player, storageId, stackIndex)
 	local toolName = stack.Name
 	if not toolName then return end
 
-	-- Find the tool template
+	-- 1. Clone tool and add to Backpack
 	local toolTemplate = ToolTemplates and ToolTemplates:FindFirstChild(toolName)
-	if toolTemplate then
-		local toolClone = toolTemplate:Clone()
-		toolClone.Parent = player.Backpack
-	else
+	if not toolTemplate then
 		warn("No tool template found for", toolName)
+		return
+	end
+	local toolClone = toolTemplate:Clone()
+	toolClone.Parent = player.Backpack
+
+	-- 2. Add toolClone to player's inventory stack (as Tool, not boolean)
+	local inv = InventoryServer.AllInventories[player]
+	if inv then
+		print("FOUNDDDDDDDDDDDDDDDDDD")
+		-- Find stack by name/type, or create one if missing
+		local foundStack
+		for _, s in ipairs(inv.Inventory) do
+			if s.Name == toolName and s.ItemType == (stack.ItemType or toolClone:GetAttribute("ItemType")) then
+				foundStack = s
+				break
+			end
+		end
+		if not foundStack then
+			foundStack = {
+				Name = toolName,
+				Description = toolClone.ToolTip,
+				Image = toolClone.TextureId,
+				ItemType = toolClone:GetAttribute("ItemType"),
+				IsDroppable = toolClone:GetAttribute("IsDroppable"),
+				Items = {},
+				StackId = inv.NextStackId or 0,
+			}
+			inv.NextStackId = (inv.NextStackId or 0) + 1
+			table.insert(inv.Inventory, foundStack)
+		end
+		table.insert(foundStack.Items, toolClone)
+	else
+		print('not found')
 	end
 
-	-- Decrement count (or remove stack if empty)
-	stack.Count = (stack.Count or 1) - 1
-	if stack.Count <= 0 then
+	-- 3. Remove one item from the shelf stack
+	-- Remove a placeholder or decrement count
+	if stack.Items and type(stack.Items) == "table" and #stack.Items > 0 then
+		table.remove(stack.Items)
+		stack.Count = #stack.Items
+	elseif stack.Count and stack.Count > 0 then
+		stack.Count -= 1
+	end
+	if (stack.Items and #stack.Items == 0) or (stack.Count and stack.Count <= 0) then
 		table.remove(shelf.Items, stackIndex)
 	end
 
-	-- Optionally, update the client about storage change here (e.g., via RemoteEvent)
+	-- (optional) Fire client update here if you want
 end
 
 return PlotStorage
